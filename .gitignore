@@ -1,0 +1,29 @@
+# Секреты — НИКОГДА не загружать на GitHub этот файл для тебя
+.env
+google_credentials.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+
+# Виртуальное окружение
+venv/
+.venv/
+env/
+
+# Модели EasyOCR (скачиваются автоматически)
+.EasyOCR/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Временные файлы
+/tmp/
+*.tmp
