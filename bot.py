@@ -530,32 +530,26 @@ async def main():
     count = load_database()
     logger.info("%s started, %d parts loaded", SYSTEM_NAME, count)
 
+    from aiohttp import web
+    from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+
     port = int(os.getenv("PORT", 8080))
-    cloud_run_url = os.getenv("CLOUD_RUN_URL", "")
+    webhook_url = "https://omni-inventory-bot-54948418739.us-east4.run.app/webhook"
 
-    if cloud_run_url:
-        # Webhook mode для Cloud Run
-        from aiohttp import web
-        from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+    await bot.set_webhook(webhook_url)
+    logger.info("webhook set: %s", webhook_url)
 
-        webhook_url = f"{cloud_run_url}/webhook"
-        await bot.set_webhook(webhook_url)
-        logger.info("webhook set: %s", webhook_url)
+    app = web.Application()
+    SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path="/webhook")
+    setup_application(app, dp, bot=bot)
 
-        app = web.Application()
-        SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path="/webhook")
-        setup_application(app, dp, bot=bot)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host="0.0.0.0", port=port)
+    await site.start()
+    logger.info("server started on port %d", port)
 
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, host="0.0.0.0", port=port)
-        await site.start()
-        logger.info("server started on port %d", port)
-
-        await asyncio.Event().wait()
-    else:
-        # Polling mode для локальной разработки
-        await dp.start_polling(bot)
+    await asyncio.Event().wait()
 
 
 if __name__ == "__main__":
