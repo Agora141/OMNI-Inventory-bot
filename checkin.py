@@ -1,172 +1,152 @@
-import csv
 import logging
-import os
 import re
 
-from config import DEFAULT_CONDITION, DEFAULT_UOM, LOCAL_CSV_PATH, SYSTEM_SHORT
+from config import DEFAULT_CONDITION, DEFAULT_UOM, SYSTEM_SHORT
 
 logger = logging.getLogger(__name__)
 
-_db_cache  = []
-_db_by_nsn = {}
-_db_by_mpn = {}
+# Supabase client — lazy init
+_supabase = None
+
+def _get_db():
+    global _supabase
+    if _supabase:
+        return _supabase
+    from supabase import create_client
+    import os
+    _supabase = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SECRET_KEY"])
+    return _supabase
 
 
 def load_database():
-    global _db_cache, _db_by_nsn, _db_by_mpn
-
-    import glob
-    logger.info("CWD: %s", os.getcwd())
-    logger.info("Files: %s", glob.glob("*"))
-    logger.info("Looking for: %s", LOCAL_CSV_PATH)
-
-    if not os.path.exists(LOCAL_CSV_PATH):
-        logger.warning("parts_db not found: %s", LOCAL_CSV_PATH)
+    try:
+        db = _get_db()
+        res = db.table("inventory").select("id", count="exact").execute()
+        count = res.count or 0
+        logger.info("inventory table: %d parts", count)
+        return count
+    except Exception as e:
+        logger.error("load_database error: %s", e)
         return 0
-
-    with open(LOCAL_CSV_PATH, newline="", encoding="utf-8") as f:
-        _db_cache = list(csv.DictReader(f))
-
-    _db_by_nsn = {r.get("nsn", "").upper(): r for r in _db_cache if r.get("nsn")}
-
-    _db_by_mpn = {}
-    for r in _db_cache:
-        # part_number и mpn — одно и то же, поддерживаем оба
-        mpn = (r.get("mpn") or r.get("part_number", "")).upper().strip()
-        if mpn and mpn not in ("N/A", ""):
-            _db_by_mpn[mpn] = r
-
-    logger.info("loaded %d parts (%d NSN, %d MPN)", len(_db_cache), len(_db_by_nsn), len(_db_by_mpn))
-    return len(_db_cache)
 
 
 def search_part(query):
-    if not _db_cache:
-        load_database()
+    if not query or not query.strip():
+        return None
 
-    q = query.strip().upper()
+    db  = _get_db()
+    q   = query.strip().upper()
     digits = re.sub(r"\D", "", q)
 
+    # Try NSN 13-digit format
     if len(digits) == 13:
-        fmt = f"{digits[0:4]}-{digits[4:6]}-{digits[6:9]}-{digits[9:13]}"
-        if fmt in _db_by_nsn:
-            return _db_by_nsn[fmt]
+        nsn = f"{digits[0:4]}-{digits[4:6]}-{digits[6:9]}-{digits[9:13]}"
+        res = db.table("inventory").select("*").eq("nsn", nsn).limit(1).execute()
+        if res.data:
+            return res.data[0]
 
-    if q in _db_by_nsn:
-        return _db_by_nsn[q]
+    # Try exact NSN
+    res = db.table("inventory").select("*").eq("nsn", q).limit(1).execute()
+    if res.data:
+        return res.data[0]
 
-    if q in _db_by_mpn:
-        return _db_by_mpn[q]
+    # Try exact MPN
+    res = db.table("inventory").select("*").eq("mpn", q).limit(1).execute()
+    if res.data:
+        return res.data[0]
 
-    if len(q) >= 4:
-        hits = [r for mpn, r in _db_by_mpn.items() if q in mpn or mpn in q]
-        if len(hits) == 1:
-            return hits[0]
-        if len(hits) > 1:
-            return sorted(hits, key=lambda r: len(r.get("mpn", r.get("part_number", ""))))[0]
+    # Try partial MPN
+    res = db.table("inventory").select("*").ilike("mpn", f"%{q}%").limit(1).execute()
+    if res.data:
+        return res.data[0]
 
-    if len(q) >= 5:
-        hits = [r for r in _db_cache if q in r.get("name", r.get("part_name", "")).upper()]
-        if hits:
-            return hits[0]
+    # Try part name
+    res = db.table("inventory").select("*").ilike("part_name", f"%{q}%").limit(1).execute()
+    if res.data:
+        return res.data[0]
 
     return None
 
 
 def search_multiple(query, limit=5):
-    if not _db_cache:
-        load_database()
+    if not query or not query.strip():
+        return []
 
-    q = query.strip().upper()
+    db = _get_db()
+    q  = query.strip().upper()
     results = []
+    seen = set()
 
-    for mpn, r in _db_by_mpn.items():
-        if q in mpn:
+    res = db.table("inventory").select("*").ilike("mpn", f"%{q}%").limit(limit).execute()
+    for r in (res.data or []):
+        if r["id"] not in seen:
             results.append(r)
-        if len(results) >= limit:
-            break
+            seen.add(r["id"])
 
     if len(results) < limit:
-        for r in _db_cache:
-            name = r.get("name", r.get("part_name", "")).upper()
-            if q in name and r not in results:
+        res = db.table("inventory").select("*").ilike("part_name", f"%{q}%").limit(limit).execute()
+        for r in (res.data or []):
+            if r["id"] not in seen:
                 results.append(r)
-            if len(results) >= limit:
-                break
+                seen.add(r["id"])
 
     return results[:limit]
 
 
 def update_part_in_db(inventory_id, quantity, storage_location, condition, photo_url=""):
-    if not _db_cache:
-        load_database()
-
-    updated = False
-    for r in _db_cache:
-        if r.get("inventory_id", "") == inventory_id:
-            r["quantity"] = str(quantity)
-            r["storage_location"] = storage_location
-            r["condition"] = condition
-            if photo_url:
-                r["photo_url"] = photo_url
-            updated = True
-            break
-
-    if not updated:
+    try:
+        db = _get_db()
+        update = {
+            "quantity":         quantity,
+            "storage_location": storage_location,
+            "condition":        condition,
+        }
+        if photo_url:
+            update["photo_url"] = photo_url
+        db.table("inventory").update(update).eq("inventory_id", inventory_id).execute()
+        return True
+    except Exception as e:
+        logger.error("update_part_in_db error: %s", e)
         return False
-
-    fieldnames = list(_db_cache[0].keys())
-    for col in ("photo_url", "storage_location", "quantity", "condition"):
-        if col not in fieldnames:
-            fieldnames.append(col)
-
-    with open(LOCAL_CSV_PATH, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in _db_cache:
-            for k in fieldnames:
-                row.setdefault(k, "")
-            writer.writerow(row)
-
-    return True
 
 
 def format_part_card(r):
-    price = float(r.get("unit_price", 0) or 0)
-    qty   = r.get("quantity", "0") or "0"
-    loc   = r.get("storage_location", "") or "не задана"
-    mpn   = r.get("part_number", r.get("mpn", "N/A"))
-    name  = r.get("name", r.get("part_name", "Неизвестно"))
-    cat   = r.get("category", r.get("category_section", ""))
+    price = float(r.get("unit_price") or 0)
+    qty   = r.get("quantity") or 0
+    loc   = r.get("storage_location") or "not set"
+    mpn   = r.get("mpn") or r.get("part_number") or "N/A"
+    name  = r.get("part_name") or r.get("name") or "Unknown"
+    cat   = r.get("category_section") or r.get("category") or ""
 
     return (
         f"📦 <b>{name[:60]}</b>\n\n"
-        f"🔢 <b>NSN:</b> <code>{r.get('nsn', 'N/A')}</code>\n"
+        f"🔢 <b>NSN:</b> <code>{r.get('nsn') or 'N/A'}</code>\n"
         f"🏷 <b>MPN:</b> <code>{mpn}</code>\n"
-        f"🏭 <b>CAGE:</b> {r.get('cage_code', '—')}\n"
-        f"📂 <b>Категория:</b> {cat}\n"
-        f"📍 <b>ID:</b> {r.get('inventory_id', '—')}\n"
-        f"💰 <b>Цена:</b> {'${:.2f}'.format(price) if price else '—'}\n"
-        f"📊 <b>Склад:</b> {qty} {r.get('unit', DEFAULT_UOM)} | {loc}\n"
-        f"🔧 <b>Состояние:</b> {r.get('condition', DEFAULT_CONDITION)}"
+        f"🏭 <b>CAGE:</b> {r.get('cage_code') or '—'}\n"
+        f"📂 <b>Category:</b> {cat}\n"
+        f"📍 <b>ID:</b> {r.get('inventory_id') or '—'}\n"
+        f"💰 <b>Price:</b> {'${:.2f}'.format(price) if price else '—'}\n"
+        f"📊 <b>Stock:</b> {qty} {r.get('uom') or DEFAULT_UOM} | {loc}\n"
+        f"🔧 <b>Condition:</b> {r.get('condition') or DEFAULT_CONDITION}"
     )
 
 
 def get_stats():
-    if not _db_cache:
-        load_database()
-
-    total       = len(_db_cache)
-    inventoried = sum(1 for r in _db_cache if int(r.get("quantity", "0") or 0) > 0)
-    located     = sum(1 for r in _db_cache
-                      if r.get("storage_location", "").strip() not in ("", "UNASSIGNED"))
-    with_photo  = sum(1 for r in _db_cache if r.get("photo_url", "").strip())
-
-    return {
-        "total":        total,
-        "inventoried":  inventoried,
-        "located":      located,
-        "with_photo":   with_photo,
-        "remaining":    total - inventoried,
-        "progress_pct": round(inventoried / total * 100, 1) if total else 0,
-    }
+    try:
+        db = _get_db()
+        rows = db.table("inventory").select("quantity,storage_location,photo_url").execute().data or []
+        total       = len(rows)
+        inventoried = sum(1 for r in rows if int(r.get("quantity") or 0) > 0)
+        located     = sum(1 for r in rows if r.get("storage_location", "").strip() not in ("", "UNASSIGNED"))
+        with_photo  = sum(1 for r in rows if r.get("photo_url", "").strip())
+        return {
+            "total":        total,
+            "inventoried":  inventoried,
+            "located":      located,
+            "with_photo":   with_photo,
+            "remaining":    total - inventoried,
+            "progress_pct": round(inventoried / total * 100, 1) if total else 0,
+        }
+    except Exception as e:
+        logger.error("get_stats error: %s", e)
+        return {"total":0,"inventoried":0,"located":0,"with_photo":0,"remaining":0,"progress_pct":0}
