@@ -15,6 +15,11 @@ _db_by_mpn = {}
 def load_database():
     global _db_cache, _db_by_nsn, _db_by_mpn
 
+    import glob
+    logger.info("CWD: %s", os.getcwd())
+    logger.info("Files: %s", glob.glob("*"))
+    logger.info("Looking for: %s", LOCAL_CSV_PATH)
+
     if not os.path.exists(LOCAL_CSV_PATH):
         logger.warning("parts_db not found: %s", LOCAL_CSV_PATH)
         return 0
@@ -26,7 +31,7 @@ def load_database():
 
     _db_by_mpn = {}
     for r in _db_cache:
-        # part_number and mpn refer to the same field — support both column names
+        # part_number и mpn — одно и то же, поддерживаем оба
         mpn = (r.get("mpn") or r.get("part_number", "")).upper().strip()
         if mpn and mpn not in ("N/A", ""):
             _db_by_mpn[mpn] = r
@@ -129,9 +134,9 @@ def update_part_in_db(inventory_id, quantity, storage_location, condition, photo
 def format_part_card(r):
     price = float(r.get("unit_price", 0) or 0)
     qty   = r.get("quantity", "0") or "0"
-    loc   = r.get("storage_location", "") or "not set"
+    loc   = r.get("storage_location", "") or "не задана"
     mpn   = r.get("part_number", r.get("mpn", "N/A"))
-    name  = r.get("name", r.get("part_name", "Unknown"))
+    name  = r.get("name", r.get("part_name", "Неизвестно"))
     cat   = r.get("category", r.get("category_section", ""))
 
     return (
@@ -139,11 +144,11 @@ def format_part_card(r):
         f"🔢 <b>NSN:</b> <code>{r.get('nsn', 'N/A')}</code>\n"
         f"🏷 <b>MPN:</b> <code>{mpn}</code>\n"
         f"🏭 <b>CAGE:</b> {r.get('cage_code', '—')}\n"
-        f"📂 <b>Category:</b> {cat}\n"
+        f"📂 <b>Категория:</b> {cat}\n"
         f"📍 <b>ID:</b> {r.get('inventory_id', '—')}\n"
-        f"💰 <b>Price:</b> {'${:.2f}'.format(price) if price else '—'}\n"
-        f"📊 <b>Stock:</b> {qty} {r.get('unit', DEFAULT_UOM)} | {loc}\n"
-        f"🔧 <b>Condition:</b> {r.get('condition', DEFAULT_CONDITION)}"
+        f"💰 <b>Цена:</b> {'${:.2f}'.format(price) if price else '—'}\n"
+        f"📊 <b>Склад:</b> {qty} {r.get('unit', DEFAULT_UOM)} | {loc}\n"
+        f"🔧 <b>Состояние:</b> {r.get('condition', DEFAULT_CONDITION)}"
     )
 
 
