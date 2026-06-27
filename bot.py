@@ -54,16 +54,16 @@ async def cmd_start(message: Message):
     s = get_stats()
     await message.answer(
         f"👋 <b>{SYSTEM_NAME}</b>\n\n"
-        f"📦 База: <b>{s['total']:,}</b> позиций\n"
-        f"✅ Проинвентаризировано: <b>{s['inventoried']:,}</b> ({s['progress_pct']}%)\n"
-        f"📍 С ячейкой: <b>{s['located']:,}</b>\n"
-        f"📸 С фото: <b>{s['with_photo']:,}</b>\n\n"
-        "/checkin — инвентаризировать\n"
-        "/find [номер] — найти\n"
-        "/audit [запрос] — поиск\n"
-        "/report — итоги\n"
-        "/export — Excel\n"
-        "/progress — прогресс",
+        f"📦 Parts in DB: <b>{s['total']:,}</b>\n"
+        f"✅ Inventoried: <b>{s['inventoried']:,}</b> ({s['progress_pct']}%)\n"
+        f"📍 With location: <b>{s['located']:,}</b>\n"
+        f"📸 With photo: <b>{s['with_photo']:,}</b>\n\n"
+        "/checkin — inventory a part\n"
+        "/find [number] — search\n"
+        "/audit [query] — audit search\n"
+        "/report — warehouse summary\n"
+        "/export — download Excel\n"
+        "/progress — progress",
         parse_mode="HTML",
     )
 
@@ -76,16 +76,19 @@ async def cmd_checkin(message: Message, state: FSMContext):
         return
     await state.set_state(CheckinFlow.waiting_query)
     await message.answer(
-        "Введите <b>NSN</b> или <b>MPN</b>:\n\n"
-        "<code>2530-01-234-5678</code>\n"
+        "Enter <b>NSN</b> or <b>MPN</b>:\n\n"
+        "<code>2530-01-234-5678</code> (NSN)\n"
         "<code>5705684</code>\n"
-        "<code>MS90725-6</code>",
+        "<code>MS90725-6</code> (MIL-SPEC)",
         parse_mode="HTML",
     )
 
 
 @dp.message(CheckinFlow.waiting_query)
 async def handle_query(message: Message, state: FSMContext):
+    if not message.text:
+        await message.answer("Please enter an NSN or MPN number.")
+        return
     await _do_search(message, state, message.text.strip())
 
 
@@ -97,9 +100,9 @@ async def _do_search(message: Message, state: FSMContext, query: str):
         await state.set_state(CheckinFlow.waiting_confirm)
 
         kb = InlineKeyboardBuilder()
-        kb.button(text="✅ Да", callback_data="ci_yes")
-        kb.button(text="🔄 Похожие", callback_data="ci_similar")
-        kb.button(text="❌ Отмена", callback_data="ci_cancel")
+        kb.button(text="✅ Yes", callback_data="ci_yes")
+        kb.button(text="🔄 Similar", callback_data="ci_similar")
+        kb.button(text="❌ Cancel", callback_data="ci_cancel")
         kb.adjust(2, 1)
 
         await message.answer(
@@ -119,11 +122,11 @@ async def _do_search(message: Message, state: FSMContext, query: str):
             mpn  = r.get("part_number", r.get("mpn", "N/A"))
             name = r.get("name", r.get("part_name", ""))[:28]
             kb.button(text=f"{mpn} — {name}", callback_data=f"ci_pick_{i}")
-        kb.button(text="❌ Ничего", callback_data="ci_cancel")
+        kb.button(text="❌ Nothing", callback_data="ci_cancel")
         kb.adjust(1)
 
         await message.answer(
-            f"Точного совпадения нет для <code>{query}</code>\n\nПохожие:",
+            f"No exact match for <code>{query}</code>\n\nSimilar items:",
             parse_mode="HTML",
             reply_markup=kb.as_markup(),
         )
@@ -131,11 +134,11 @@ async def _do_search(message: Message, state: FSMContext, query: str):
 
     await state.clear()
     kb = InlineKeyboardBuilder()
-    kb.button(text="🔄 Попробовать снова", callback_data="ci_retry")
-    kb.button(text="📸 Фото этикетки", callback_data="ci_photo")
+    kb.button(text="🔄 Try again", callback_data="ci_retry")
+    kb.button(text="📸 Photo of label", callback_data="ci_photo")
     kb.adjust(1)
     await message.answer(
-        f"<code>{query}</code> не найдено.\n\nПроверьте номер или отправьте фото.",
+        f"<code>{query}</code> not found.\n\nCheck the number or send a photo.",
         parse_mode="HTML",
         reply_markup=kb.as_markup(),
     )
@@ -146,7 +149,7 @@ async def cb_yes(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     await callback.message.edit_reply_markup()
     await state.set_state(CheckinFlow.waiting_quantity)
-    await callback.message.answer("Сколько штук?")
+    await callback.message.answer("How many units?")
 
 
 @dp.callback_query(F.data.startswith("ci_pick_"))
@@ -155,7 +158,7 @@ async def cb_pick(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     similar = data.get("similar", [])
     if idx >= len(similar):
-        await callback.answer("Ошибка")
+        await callback.answer("Error")
         return
     part = similar[idx]
     await state.update_data(part=part)
@@ -164,8 +167,8 @@ async def cb_pick(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_reply_markup()
 
     kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Да", callback_data="ci_yes")
-    kb.button(text="❌ Отмена", callback_data="ci_cancel")
+    kb.button(text="✅ Yes", callback_data="ci_yes")
+    kb.button(text="❌ Cancel", callback_data="ci_cancel")
     kb.adjust(2)
 
     await callback.message.answer(
@@ -181,45 +184,45 @@ async def cb_similar(callback: CallbackQuery, state: FSMContext):
     similar = search_multiple(data.get("query", ""), 5)
     await callback.answer()
     if not similar:
-        await callback.message.answer("Похожих не найдено.")
+        await callback.message.answer("No similar parts found.")
         return
     kb = InlineKeyboardBuilder()
     for i, r in enumerate(similar):
         mpn  = r.get("part_number", r.get("mpn", "N/A"))
         name = r.get("name", r.get("part_name", ""))[:28]
         kb.button(text=f"{mpn} — {name}", callback_data=f"ci_pick_{i}")
-    kb.button(text="❌ Отмена", callback_data="ci_cancel")
+    kb.button(text="❌ Cancel", callback_data="ci_cancel")
     kb.adjust(1)
     await state.update_data(similar=similar)
-    await callback.message.answer("Похожие:", reply_markup=kb.as_markup())
+    await callback.message.answer("Similar items:", reply_markup=kb.as_markup())
 
 
 @dp.callback_query(F.data == "ci_cancel")
 async def cb_cancel(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.answer()
-    await callback.message.edit_text("Отменено. /checkin — начать заново.")
+    await callback.message.edit_text("Cancelled. /checkin — start over.")
 
 
 @dp.callback_query(F.data == "ci_retry")
 async def cb_retry(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     await state.set_state(CheckinFlow.waiting_query)
-    await callback.message.answer("Введите NSN или MPN:")
+    await callback.message.answer("Enter NSN or MPN:")
 
 
 @dp.callback_query(F.data == "ci_photo")
 async def cb_photo_mode(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     await state.clear()
-    await callback.message.answer("Отправьте фото этикетки.")
+    await callback.message.answer("Send a photo of the label.")
 
 
 @dp.message(CheckinFlow.waiting_quantity)
 async def handle_qty(message: Message, state: FSMContext):
     text = message.text.strip().replace(",", "")
     if not text.isdigit() or int(text) < 0:
-        await message.answer("Введите целое число, например <code>15</code>", parse_mode="HTML")
+        await message.answer("Enter a whole number, e.g. <code>15</code>", parse_mode="HTML")
         return
 
     qty  = int(text)
@@ -231,8 +234,8 @@ async def handle_qty(message: Message, state: FSMContext):
 
     total = f"${price * qty:,.2f}" if price else "—"
     await message.answer(
-        f"{qty} шт. | {total}\n\nУкажите ячейку хранения:\n"
-        "<i>Например: <code>A-04-B-2</code> или <code>PALLET-08</code></i>",
+        f"{qty} units | {total}\n\nEnter storage location:\n"
+        "<i>Example: <code>A-04-B-2</code> or <code>PALLET-08</code></i>",
         parse_mode="HTML",
     )
 
@@ -241,7 +244,7 @@ async def handle_qty(message: Message, state: FSMContext):
 async def handle_loc(message: Message, state: FSMContext):
     loc = message.text.strip().upper()
     if len(loc) < 2:
-        await message.answer("Укажите адрес, например <code>A-04</code>", parse_mode="HTML")
+        await message.answer("Enter location, e.g. <code>A-04</code>", parse_mode="HTML")
         return
 
     await state.update_data(storage_location=loc)
@@ -250,13 +253,13 @@ async def handle_loc(message: Message, state: FSMContext):
     kb = InlineKeyboardBuilder()
     kb.button(text="NOS — New Old Stock",        callback_data="cond_NOS")
     kb.button(text="A — Serviceable",           callback_data="cond_A")
-    kb.button(text="Used — б/у рабочее",        callback_data="cond_Used")
-    kb.button(text="Take-off — снято с машины", callback_data="cond_Takeoff")
+    kb.button(text="Used — functional",        callback_data="cond_Used")
+    kb.button(text="Take-off — removed from equipment", callback_data="cond_Takeoff")
     kb.button(text="Unserviceable",             callback_data="cond_Unserviceable")
     kb.adjust(2, 2, 1)
 
     await message.answer(
-        f"Ячейка: <b>{loc}</b>\n\nСостояние:",
+        f"Location: <b>{loc}</b>\n\nCondition:",
         parse_mode="HTML",
         reply_markup=kb.as_markup(),
     )
@@ -341,16 +344,16 @@ async def handle_checkin_photo(message: Message, state: FSMContext):
         f"NSN: <code>{part.get('nsn', '')}</code> | MPN: <code>{mpn}</code>\n"
         f"ID: <b>{part.get('inventory_id', '')}</b> | Ячейка: <b>{location}</b>\n"
         f"{quantity} шт. × {price_s} = <b>{total_s}</b>\n"
-        f"Состояние: {condition} | Фото: ✅\n"
-        f"{'Sheets: ✅' if sheets_ok else 'Sheets: ⚠️ ошибка'}\n\n"
-        "/checkin — следующая",
+        f"Condition: {condition} | Photo: ✅\n"
+        f"{'Sheets: ✅' if sheets_ok else 'Sheets: ⚠️ error'}\n\n"
+        "/checkin — next part",
         parse_mode="HTML",
     )
 
 
 @dp.message(CheckinFlow.waiting_photo, F.text)
 async def skip_photo(message: Message, state: FSMContext):
-    if message.text.strip().lower() in ("пропустить", "skip", "-", "нет", "no"):
+    if message.text.strip().lower() in ("skip", "-", "no", "нет", "пропустить"):
         data = await state.get_data()
         await state.clear()
         part = data["part"]
@@ -361,14 +364,14 @@ async def skip_photo(message: Message, state: FSMContext):
             data.get("condition", DEFAULT_CONDITION),
         )
         await message.answer(
-            f"✅ Записано без фото\n"
+            f"✅ Saved without photo\n"
             f"<code>{part.get('nsn', '')}</code> | "
             f"{data.get('storage_location', '')} | "
-            f"{data.get('quantity', 0)} шт.\n\n/checkin — следующая",
+            f"{data.get('quantity', 0)} units\n\n/checkin — next",
             parse_mode="HTML",
         )
     else:
-        await message.answer("Отправьте фото или напишите «пропустить».")
+        await message.answer("Send a photo or type skip.")
 
 
 @dp.message(F.photo)
@@ -378,7 +381,7 @@ async def handle_photo(message: Message, state: FSMContext):
         await handle_checkin_photo(message, state)
         return
 
-    await message.answer("Распознаю...")
+    await message.answer("Recognizing...")
 
     photo: PhotoSize = message.photo[-1]
     file = await bot.get_file(photo.file_id)
@@ -405,7 +408,7 @@ async def handle_photo(message: Message, state: FSMContext):
 
     if not part:
         await message.answer(
-            "Не удалось распознать.\n/checkin [NSN или MPN] — ввести вручную"
+            "Could not recognize.\n/checkin [NSN or MPN] — enter manually"
         )
         return
 
@@ -421,7 +424,7 @@ async def handle_photo(message: Message, state: FSMContext):
 async def cmd_find(message: Message):
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
-        await message.answer("/find [NSN или MPN]")
+        await message.answer("/find [NSN or MPN]")
         return
     part = search_part(args[1].strip())
     if part:
@@ -429,12 +432,12 @@ async def cmd_find(message: Message):
         return
     similar = search_multiple(args[1].strip(), 3)
     if similar:
-        lines = ["Похожие:\n"]
+        lines = ["Similar:\n"]
         for r in similar:
             lines.append(f"• <code>{r.get('nsn','')}</code> — {r.get('name','')[:40]}")
         await message.answer("\n".join(lines), parse_mode="HTML")
     else:
-        await message.answer(f"<code>{args[1]}</code> не найдено.", parse_mode="HTML")
+        await message.answer(f"<code>{args[1]}</code> not found.", parse_mode="HTML")
 
 
 @dp.message(Command("progress"))
@@ -444,11 +447,11 @@ async def cmd_progress(message: Message):
     bar = "█" * int(pct / 5) + "░" * (20 - int(pct / 5))
     await message.answer(
         f"[{bar}] {pct}%\n\n"
-        f"Всего: {s['total']:,}\n"
-        f"Проинвентаризировано: {s['inventoried']:,}\n"
-        f"С ячейкой: {s['located']:,}\n"
-        f"С фото: {s['with_photo']:,}\n"
-        f"Осталось: {s['remaining']:,}",
+        f"Total: {s['total']:,}\n"
+        f"Inventoried: {s['inventoried']:,}\n"
+        f"With location: {s['located']:,}\n"
+        f"With photo: {s['with_photo']:,}\n"
+        f"Remaining: {s['remaining']:,}",
     )
 
 
@@ -458,12 +461,12 @@ async def cmd_report(message: Message):
         summary = await asyncio.to_thread(get_dashboard_summary)
         await message.answer(summary, parse_mode="HTML")
     except Exception as e:
-        await message.answer(f"Ошибка: {e}")
+        await message.answer(f"Error: {e}")
 
 
 @dp.message(Command("export"))
 async def cmd_export(message: Message):
-    await message.answer("Генерирую Excel...")
+    await message.answer("Generating Excel...")
     try:
         with open(LOCAL_CSV_PATH, newline="", encoding="utf-8") as f:
             records = list(csv_module.DictReader(f))
@@ -477,13 +480,13 @@ async def cmd_export(message: Message):
             caption=(
                 f"<b>{SYSTEM_NAME}</b>\n\n"
                 "Cover Page | Inventory Master | Blank Audit Form | By Category\n\n"
-                "READ-ONLY для аудиторов"
+                "READ-ONLY for auditors"
             ),
             parse_mode="HTML",
         )
     except Exception as e:
         logger.exception("export failed")
-        await message.answer(f"Ошибка: {e}")
+        await message.answer(f"Error: {e}")
 
 
 @dp.message(Command("audit"))
@@ -491,10 +494,10 @@ async def cmd_audit(message: Message):
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
         await message.answer(
-            "/audit A-04 — по ячейке\n"
-            "/audit DRIVETRAIN — по категории\n"
-            "/audit IPM-00042 — по ID\n"
-            "/audit 2530-01-234-5678 — по NSN"
+            "/audit A-04 — by location\n"
+            "/audit DRIVETRAIN — by category\n"
+            "/audit IPM-00042 — by ID\n"
+            "/audit 2530-01-234-5678 — by NSN"
         )
         return
 
@@ -510,10 +513,10 @@ async def cmd_audit(message: Message):
                q in r.get("name", "").upper()]
 
     if not results:
-        await message.answer(f"Ничего по запросу <code>{q}</code>", parse_mode="HTML")
+        await message.answer(f"Nothing found for <code>{q}</code>", parse_mode="HTML")
         return
 
-    lines = [f"<b>{len(results)} позиций</b>\n"]
+    lines = [f"<b>{len(results)} positions</b>\n"]
     for r in results[:8]:
         lines.append(
             f"• <b>{r.get('inventory_id','')}</b> <code>{r.get('nsn','')}</code>\n"
