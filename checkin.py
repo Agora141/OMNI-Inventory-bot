@@ -13,8 +13,8 @@ def _get_db():
     if _supabase:
         return _supabase
     from supabase import create_client
-    import os
-    _supabase = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SECRET_KEY"])
+    from config import SUPABASE_URL, SUPABASE_SECRET_KEY
+    _supabase = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
     return _supabase
 
 
