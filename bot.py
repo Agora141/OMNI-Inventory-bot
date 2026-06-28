@@ -93,7 +93,7 @@ async def handle_query(message: Message, state: FSMContext):
 
 
 async def _do_search(message: Message, state: FSMContext, query: str):
-    part = search_part(query)
+    part = await asyncio.to_thread(search_part, query)
 
     if part:
         await state.update_data(part=part, query=query)
@@ -112,7 +112,7 @@ async def _do_search(message: Message, state: FSMContext, query: str):
         )
         return
 
-    similar = search_multiple(query, 5)
+    similar = await asyncio.to_thread(search_multiple, query, 5)
     if similar:
         await state.update_data(similar=similar, query=query)
         await state.set_state(CheckinFlow.waiting_confirm)
@@ -181,7 +181,7 @@ async def cb_pick(callback: CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data == "ci_similar")
 async def cb_similar(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    similar = search_multiple(data.get("query", ""), 5)
+    similar = await asyncio.to_thread(search_multiple, data.get("query", ""), 5)
     await callback.answer()
     if not similar:
         await callback.message.answer("No similar parts found.")
@@ -426,18 +426,20 @@ async def cmd_find(message: Message):
     if len(args) < 2:
         await message.answer("/find [NSN or MPN]")
         return
-    part = search_part(args[1].strip())
+    query = args[1].strip()
+    part = await asyncio.to_thread(search_part, query)
     if part:
         await message.answer(format_part_card(part), parse_mode="HTML")
         return
-    similar = search_multiple(args[1].strip(), 3)
+    similar = await asyncio.to_thread(search_multiple, query, 3)
     if similar:
         lines = ["Similar:\n"]
         for r in similar:
-            lines.append(f"• <code>{r.get('nsn','')}</code> — {r.get('name','')[:40]}")
+            name = r.get("part_name") or r.get("name") or ""
+            lines.append(f"• <code>{r.get('nsn','')}</code> — {name[:40]}")
         await message.answer("\n".join(lines), parse_mode="HTML")
     else:
-        await message.answer(f"<code>{args[1]}</code> not found.", parse_mode="HTML")
+        await message.answer(f"<code>{query}</code> not found.", parse_mode="HTML")
 
 
 @dp.message(Command("progress"))
