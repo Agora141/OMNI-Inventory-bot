@@ -93,7 +93,7 @@ async def handle_query(message: Message, state: FSMContext):
 
 
 async def _do_search(message: Message, state: FSMContext, query: str):
-    part = await asyncio.to_thread(search_part, query)
+    part = search_part(query)
 
     if part:
         await state.update_data(part=part, query=query)
@@ -112,7 +112,7 @@ async def _do_search(message: Message, state: FSMContext, query: str):
         )
         return
 
-    similar = await asyncio.to_thread(search_multiple, query, 5)
+    similar = search_multiple(query, 5)
     if similar:
         await state.update_data(similar=similar, query=query)
         await state.set_state(CheckinFlow.waiting_confirm)
@@ -181,7 +181,7 @@ async def cb_pick(callback: CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data == "ci_similar")
 async def cb_similar(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    similar = await asyncio.to_thread(search_multiple, data.get("query", ""), 5)
+    similar = search_multiple(data.get("query", ""), 5)
     await callback.answer()
     if not similar:
         await callback.message.answer("No similar parts found.")
@@ -426,20 +426,18 @@ async def cmd_find(message: Message):
     if len(args) < 2:
         await message.answer("/find [NSN or MPN]")
         return
-    query = args[1].strip()
-    part = await asyncio.to_thread(search_part, query)
+    part = search_part(args[1].strip())
     if part:
         await message.answer(format_part_card(part), parse_mode="HTML")
         return
-    similar = await asyncio.to_thread(search_multiple, query, 3)
+    similar = search_multiple(args[1].strip(), 3)
     if similar:
         lines = ["Similar:\n"]
         for r in similar:
-            name = r.get("part_name") or r.get("name") or ""
-            lines.append(f"• <code>{r.get('nsn','')}</code> — {name[:40]}")
+            lines.append(f"• <code>{r.get('nsn','')}</code> — {r.get('name','')[:40]}")
         await message.answer("\n".join(lines), parse_mode="HTML")
     else:
-        await message.answer(f"<code>{query}</code> not found.", parse_mode="HTML")
+        await message.answer(f"<code>{args[1]}</code> not found.", parse_mode="HTML")
 
 
 @dp.message(Command("progress"))
@@ -470,8 +468,8 @@ async def cmd_report(message: Message):
 async def cmd_export(message: Message):
     await message.answer("Generating Excel...")
     try:
-        with open(LOCAL_CSV_PATH, newline="", encoding="utf-8") as f:
-            records = list(csv_module.DictReader(f))
+        from checkin import _cache_all
+        records = _cache_all if _cache_all else []
 
         output = f"/tmp/{SYSTEM_SHORT}_audit.xlsx"
         await asyncio.to_thread(export_audit_excel, records, output)
@@ -504,29 +502,30 @@ async def cmd_audit(message: Message):
         return
 
     q = args[1].strip().upper()
-    with open(LOCAL_CSV_PATH, newline="", encoding="utf-8") as f:
-        rows = list(csv_module.DictReader(f))
+    from checkin import _cache_all, _ensure_loaded
+    _ensure_loaded()
+    rows = _cache_all
 
     results = [r for r in rows if
-               q in r.get("storage_location", "").upper() or
-               q in r.get("inventory_id", "").upper() or
-               q in r.get("category", "").upper() or
-               q in r.get("nsn", "").upper() or
-               q in r.get("name", "").upper()]
+               q in (r.get("storage_location") or "").upper() or
+               q in (r.get("inventory_id") or "").upper() or
+               q in (r.get("category_section") or "").upper() or
+               q in (r.get("nsn") or "").upper() or
+               q in (r.get("part_name") or "").upper()]
 
     if not results:
         await message.answer(f"Nothing found for <code>{q}</code>", parse_mode="HTML")
         return
 
-    lines = [f"<b>{len(results)} positions</b>\n"]
+    lines = [f"<b>{len(results)} results</b>\n"]
     for r in results[:8]:
         lines.append(
             f"• <b>{r.get('inventory_id','')}</b> <code>{r.get('nsn','')}</code>\n"
-            f"  {r.get('name','')[:45]}\n"
-            f"  {r.get('storage_location','—')} | {r.get('quantity','0')} шт. | {r.get('condition','NOS')}"
+            f"  {(r.get('part_name') or '')[:45]}\n"
+            f"  {r.get('storage_location','—')} | {r.get('quantity','0')} units | {r.get('condition','NOS')}"
         )
     if len(results) > 8:
-        lines.append(f"\n<i>...ещё {len(results) - 8}. /export для полного списка.</i>")
+        lines.append(f"\n<i>...{len(results) - 8} more. /export for full list.</i>")
 
     await message.answer("\n".join(lines), parse_mode="HTML")
 
