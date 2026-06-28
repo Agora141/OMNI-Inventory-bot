@@ -1,11 +1,10 @@
 import logging
 import re
 
-from config import DEFAULT_CONDITION, DEFAULT_UOM, SYSTEM_SHORT
+from config import DEFAULT_CONDITION, DEFAULT_UOM, SUPABASE_URL, SUPABASE_SECRET_KEY, SYSTEM_SHORT
 
 logger = logging.getLogger(__name__)
 
-# Supabase client — lazy init
 _supabase = None
 
 def _get_db():
@@ -13,8 +12,8 @@ def _get_db():
     if _supabase:
         return _supabase
     from supabase import create_client
-    from config import SUPABASE_URL, SUPABASE_SECRET_KEY
     _supabase = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
+    logger.info("supabase client created: %s", SUPABASE_URL[:30])
     return _supabase
 
 
@@ -34,63 +33,72 @@ def search_part(query):
     if not query or not query.strip():
         return None
 
-    db  = _get_db()
-    q   = query.strip().upper()
-    digits = re.sub(r"\D", "", q)
+    try:
+        db = _get_db()
+        q  = query.strip().upper()
+        digits = re.sub(r"\D", "", q)
+        logger.info("search_part: query=%s q=%s digits=%s", query, q, digits)
 
-    # Try NSN 13-digit format
-    if len(digits) == 13:
-        nsn = f"{digits[0:4]}-{digits[4:6]}-{digits[6:9]}-{digits[9:13]}"
-        res = db.table("inventory").select("*").eq("nsn", nsn).limit(1).execute()
+        if len(digits) == 13:
+            nsn = f"{digits[0:4]}-{digits[4:6]}-{digits[6:9]}-{digits[9:13]}"
+            res = db.table("inventory").select("*").eq("nsn", nsn).limit(1).execute()
+            logger.info("nsn search result: %s", res.data)
+            if res.data:
+                return res.data[0]
+
+        res = db.table("inventory").select("*").eq("nsn", q).limit(1).execute()
         if res.data:
             return res.data[0]
 
-    # Try exact NSN
-    res = db.table("inventory").select("*").eq("nsn", q).limit(1).execute()
-    if res.data:
-        return res.data[0]
+        res = db.table("inventory").select("*").eq("mpn", q).limit(1).execute()
+        logger.info("mpn exact search result: %s", res.data)
+        if res.data:
+            return res.data[0]
 
-    # Try exact MPN
-    res = db.table("inventory").select("*").eq("mpn", q).limit(1).execute()
-    if res.data:
-        return res.data[0]
+        res = db.table("inventory").select("*").ilike("mpn", f"%{q}%").limit(1).execute()
+        logger.info("mpn ilike search result: %s", res.data)
+        if res.data:
+            return res.data[0]
 
-    # Try partial MPN
-    res = db.table("inventory").select("*").ilike("mpn", f"%{q}%").limit(1).execute()
-    if res.data:
-        return res.data[0]
+        res = db.table("inventory").select("*").ilike("part_name", f"%{q}%").limit(1).execute()
+        if res.data:
+            return res.data[0]
 
-    # Try part name
-    res = db.table("inventory").select("*").ilike("part_name", f"%{q}%").limit(1).execute()
-    if res.data:
-        return res.data[0]
+        return None
 
-    return None
+    except Exception as e:
+        logger.error("search_part error: %s", e)
+        return None
 
 
 def search_multiple(query, limit=5):
     if not query or not query.strip():
         return []
 
-    db = _get_db()
-    q  = query.strip().upper()
-    results = []
-    seen = set()
+    try:
+        db = _get_db()
+        q  = query.strip().upper()
+        results = []
+        seen = set()
 
-    res = db.table("inventory").select("*").ilike("mpn", f"%{q}%").limit(limit).execute()
-    for r in (res.data or []):
-        if r["id"] not in seen:
-            results.append(r)
-            seen.add(r["id"])
-
-    if len(results) < limit:
-        res = db.table("inventory").select("*").ilike("part_name", f"%{q}%").limit(limit).execute()
+        res = db.table("inventory").select("*").ilike("mpn", f"%{q}%").limit(limit).execute()
         for r in (res.data or []):
             if r["id"] not in seen:
                 results.append(r)
                 seen.add(r["id"])
 
-    return results[:limit]
+        if len(results) < limit:
+            res = db.table("inventory").select("*").ilike("part_name", f"%{q}%").limit(limit).execute()
+            for r in (res.data or []):
+                if r["id"] not in seen:
+                    results.append(r)
+                    seen.add(r["id"])
+
+        return results[:limit]
+
+    except Exception as e:
+        logger.error("search_multiple error: %s", e)
+        return []
 
 
 def update_part_in_db(inventory_id, quantity, storage_location, condition, photo_url=""):
@@ -134,8 +142,9 @@ def format_part_card(r):
 def get_stats():
     try:
         db = _get_db()
-        rows = db.table("inventory").select("quantity,storage_location,photo_url").execute().data or []
-        total       = len(rows)
+        res = db.table("inventory").select("quantity,storage_location,photo_url", count="exact").execute()
+        rows = res.data or []
+        total       = res.count or len(rows)
         inventoried = sum(1 for r in rows if int(r.get("quantity") or 0) > 0)
         located     = sum(1 for r in rows if r.get("storage_location", "").strip() not in ("", "UNASSIGNED"))
         with_photo  = sum(1 for r in rows if r.get("photo_url", "").strip())
